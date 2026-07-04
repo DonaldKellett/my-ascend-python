@@ -150,7 +150,7 @@ def main():
             data = gzip.decompress(data_gzip)
             out_file.write(data)
 
-    learning_rate = 0.01
+    learning_rate = 0.05
     batch_size = 128
     epochs = 10
 
