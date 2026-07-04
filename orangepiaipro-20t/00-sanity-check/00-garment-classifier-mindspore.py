@@ -1,4 +1,3 @@
-import datetime
 import gzip
 import mindspore
 import mindspore.amp as amp
