@@ -4,6 +4,12 @@ import mindspore.ops as ops
 
 from mindspore import dtype as mstype
 
+"""
+03-recurrent-neural-networks.py
+MindSpore adaptation of D2L chapter 9.4
+https://d2l.ai/chapter_recurrent-neural-networks/rnn.html
+"""
+
 def main():
     mindspore.set_device(device_target='Ascend', device_id=0)
 

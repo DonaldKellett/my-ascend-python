@@ -13,6 +13,12 @@ import urllib.request
 from mindspore import dtype as mstype
 
 """
+04-recurrent-neural-network-implementation-from-scratch.py
+MindSpore adaptation of D2L chapter 9.5
+https://d2l.ai/chapter_recurrent-neural-networks/rnn-scratch.html
+"""
+
+"""
 Recurrent neural network layer from scratch
 Here, we implement a simplified version of mindspore.nn.RNN
 https://www.mindspore.cn/docs/en/r2.9.0/api_python/nn/mindspore.nn.RNN.html
