@@ -137,10 +137,52 @@ def clip_by_global_norm(grads, clip_norm=1.0):
 
     if norm > clip_norm:
         scale = clip_norm / norm
-        clipped = [mindspore.Tensor(g.asnumpy() * scale, dtype=g.dtype) for g in grads]
+        clipped = tuple([mindspore.Tensor(g.asnumpy() * scale, dtype=g.dtype) for g in grads])
         return clipped
     else:
         return grads
+
+"""
+Generate a continuation for a given prefix using the trained RNN language model
+"""
+def predict(network, prefix, num_preds, vocab):
+    network.set_train(False)
+
+    prefix_indices = [vocab[ch] for ch in prefix]
+
+    outputs = [prefix_indices[0]]
+
+    batch_size = 1
+    hidden_size = network.hidden_size
+    vocab_size = network.vocab_size
+
+    h = ops.zeros((batch_size, hidden_size), dtype=mstype.float16)
+
+    on_value = mindspore.Tensor(1.0, dtype=mstype.float16)
+    off_value = mindspore.Tensor(0.0, dtype=mstype.float16)
+
+    for i in range(len(prefix) + num_preds - 1):
+        cur_idx = outputs[-1]
+
+        one_hot = ops.one_hot(
+            mindspore.Tensor([cur_idx], dtype=mstype.int32),
+            vocab_size,
+            on_value=on_value,
+            off_value=off_value
+        )
+        X = one_hot.reshape(1, 1, vocab_size)
+
+        rnn_output, h = network.rnn(X, h)
+
+        logits = network.dense1(rnn_output[0])
+
+        if i < len(prefix) - 1:
+            outputs.append(prefix_indices[i + 1])
+        else:
+            pred_idx = int(logits.argmax(axis=1).asnumpy()[0])
+            outputs.append(pred_idx)
+
+    return ''.join([vocab.idx_to_token[idx] for idx in outputs])
 
 def transform_ds(dataset, batch_size, num_steps, vocab_size):
     feature_transforms = [
@@ -333,6 +375,17 @@ def main():
         validate_epoch(epoch=epoch)
 
     mlflow.end_run()
+
+    """
+    Predict the next 20 tokens based on some predefined input
+    """
+    continuation = predict(
+        network=net,
+        prefix='it has',
+        num_preds=20,
+        vocab=vocab
+    )
+    print(continuation)
 
 if __name__ == '__main__':
     main()
