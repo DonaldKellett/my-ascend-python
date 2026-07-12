@@ -12,12 +12,89 @@ import re
 import urllib.request
 
 from mindspore import dtype as mstype
+from mindspore.train import Callback, Loss, LossMonitor, Model
 
 """
 05-concise-implementation-of-recurrent-neural-networks.py
 MindSpore adaptation of D2L chapter 9.6
 https://d2l.ai/chapter_recurrent-neural-networks/rnn-concise.html
 """
+
+"""
+Define our custom evaluation cell for MindSpore's Model API
+This is required since we define a custom training loop
+"""
+class CustomEvalCell(nn.Cell):
+    def __init__(self, backbone, loss_fn):
+        super(CustomEvalCell, self).__init__()
+        self.backbone = backbone
+        self.loss_fn = loss_fn
+
+    def construct(self, data, label):
+        logits = self.backbone(data)
+        loss = self.loss_fn(logits, label)
+        return loss, logits, label
+
+"""
+Custom step-wise training cell with gradient clipping
+"""
+class CustomTrainStepCell(nn.TrainOneStepCell):
+    def __init__(self, network, optimizer):
+        super(CustomTrainStepCell, self).__init__(network, optimizer)
+        self.grad_fn = mindspore.value_and_grad(self.network, grad_position=None, weights=self.weights)
+
+    def construct(self, data, label):
+        loss, grads = self.grad_fn(data, label)
+        clipped_grads = clip_by_global_norm(grads)
+        loss = ops.depend(loss, self.optimizer(clipped_grads))
+        return loss
+
+"""
+MLflow logging callback with perplexity
+"""
+class MLflowLogging(Callback):
+    def __init__(self, run_name, network_type, loss_fn, learning_rate, batch_size, epochs, weight_decay=0.0, momentum=0.0, optimizer='sgd'):
+        super().__init__()
+        self.run_name = run_name
+        self.network_type = network_type
+        self.loss_fn = loss_fn
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.weight_decay = weight_decay
+        self.momentum = momentum
+        self.optimizer = optimizer
+
+        self.run = mlflow.start_run(run_name=self.run_name)
+        hyperparameters = {
+            'learning_rate': self.learning_rate,
+            'weight_decay': self.weight_decay,
+            'momentum': self.momentum,
+            'loss_fn': self.loss_fn,
+            'optimizer': self.optimizer,
+            'batch_size': self.batch_size,
+            'network_type': self.network_type,
+            'epochs': self.epochs
+        }
+        mlflow.log_params(hyperparameters)
+
+    def on_train_step_end(self, run_context):
+        cb_params = run_context.original_args()
+        current_loss = cb_params.net_outputs.asnumpy().mean()
+        current_perplexity = np.exp(current_loss)
+        mlflow.log_metric('train_loss', current_loss, step=cb_params.cur_step_num)
+        mlflow.log_metric('train_perplexity', current_perplexity, step=cb_params.cur_step_num)
+
+    def on_train_epoch_end(self, run_context):
+        cb_params = run_context.original_args()
+        if hasattr(cb_params, 'eval_results') and cb_params.eval_results:
+            val_loss = cb_params.eval_results.get('loss', 0.0)
+            val_perplexity = np.exp(val_loss)
+            mlflow.log_metric('val_loss', val_loss, step=cb_params.cur_epoch_num)
+            mlflow.log_metric('val_perplexity', val_perplexity, step=cb_params.cur_epoch_num)
+
+    def on_train_end(self, run_context):
+        mlflow.end_run()
 
 """
 Concise implementation of RNN-based character-level language model
@@ -215,7 +292,6 @@ def main():
     Initialize our training and validation sets and split them into batches of 2^10=1024
     """
     batch_size = 1024
-    batches_per_epoch = 127 # Precomputed based on size of training set
     train_ds = ds.NumpySlicesDataset(data=(X_train, y_train), column_names=['feature', 'label'], shuffle=True)
     test_ds = ds.NumpySlicesDataset(data=(X_test, y_test), column_names=['feature', 'label'], shuffle=True)
     train_ds = transform_ds(train_ds, batch_size=batch_size, num_steps=num_steps, vocab_size=vocab_size)
@@ -237,85 +313,54 @@ def main():
     optimizer = nn.SGD(params=net_amp.trainable_params(), learning_rate=learning_rate)
 
     """
-    Define our forward and gradient functions
+    Define our WithLossCell to wrap our network and loss function
     """
-    def forward(X, y):
-        y_hat = net_amp(X)
-        loss = loss_fn(y_hat, y)
-        return loss, y_hat
-
-    grad_fn = mindspore.value_and_grad(fn=forward, grad_position=None, weights=optimizer.parameters, has_aux=True)
+    net_amp_with_loss = nn.WithLossCell(backbone=net_amp, loss_fn=loss_fn)
 
     """
-    Define the training logic on a single batch and epoch
+    Specify our custom step-wise training cell to include gradient clipping during backpropagation
     """
-    def train_batch(X_batch, y_batch):
-        (loss, _), grads = grad_fn(X_batch, y_batch)
-        # Clip gradients to avoid the exploding gradients issue common in RNNs
-        clipped_grads = clip_by_global_norm(grads)
-        optimizer(clipped_grads)
-        return loss
-
-    def train_epoch(epoch=0):
-        print(f'Epoch {epoch} start')
-        batch_count = train_ds.get_dataset_size()
-        net_amp.set_train()
-        for batch_idx, (X_batch, y_batch) in enumerate(train_ds.create_tuple_iterator()):
-            loss = train_batch(X_batch, y_batch)
-            loss_ndarray = loss.asnumpy()
-            perplexity_ndarray = np.exp(loss_ndarray)
-            if batch_idx % 10 == 0:
-                print(f'Training loss: {loss_ndarray:.4f} [{batch_idx}/{batch_count}]')
-            mlflow.log_metric('train_loss', loss_ndarray, step=epoch*batches_per_epoch+batch_idx)
-            mlflow.log_metric('train_perplexity', perplexity_ndarray, step=epoch*batches_per_epoch+batch_idx)
-        print(f'Epoch {epoch} end')
+    train_net_amp_with_loss = CustomTrainStepCell(
+        network=net_amp_with_loss,
+        optimizer=optimizer
+    )
 
     """
-    Define the validation logic at the end of each epoch
+    Specify our custom evaluation cell
     """
-    def validate_epoch(epoch=0):
-        validation_losses = []
-        net_amp.set_train(False)
-        for X_batch, y_batch in test_ds.create_tuple_iterator():
-            batch_size = X_batch.shape[0]
-            y_hat = net_amp(X_batch)
-            validation_loss = (batch_size, loss_fn(y_hat, y_batch).item())
-            validation_losses.append(validation_loss)
-        val_samples_total = sum(batch_size for batch_size, _ in validation_losses)
-        val_loss = sum(batch_size * batch_loss for batch_size, batch_loss in validation_losses) / val_samples_total
-        val_perplexity = np.exp(val_loss)
-        print(f'Validation loss after epoch {epoch}: {val_loss:.4f}')
-        mlflow.log_metric('val_loss', val_loss, step=epoch)
-        mlflow.log_metric('val_perplexity', val_perplexity, step=epoch)
+    net_amp_with_loss_eval = CustomEvalCell(backbone=net_amp, loss_fn=loss_fn)
 
     """
-    Train our character-level language model over 100 epochs
+    Train our model over the specified number of epochs using Model API
     """
     run_name = '05-concise-implementation-of-recurrent-neural-networks'
     network_type = 'rnn'
     loss_fn_str = 'softmax_cross_entropy'
-    weight_decay = 0.0
-    momentum = 0.0
-    optimizer_str = 'sgd'
 
-    run = mlflow.start_run(run_name=run_name)
-    hyperparameters = {
-        'learning_rate': learning_rate,
-        'weight_decay': weight_decay,
-        'momentum': momentum,
-        'loss_fn': loss_fn_str,
-        'optimizer': optimizer_str,
-        'batch_size': batch_size,
-        'network_type': network_type,
-        'epochs': epochs
-    }
-    mlflow.log_params(hyperparameters)
-
-    for epoch in range(epochs):
-        train_epoch(epoch=epoch)
-        validate_epoch(epoch=epoch)
-
-    mlflow.end_run()
+    model = Model(
+        network=train_net_amp_with_loss,
+        metrics={'loss': Loss()},
+        eval_network=net_amp_with_loss_eval,
+        eval_indexes=[0, 1, 2]
+    )
+    callbacks = [
+        LossMonitor(per_print_times=10),
+        MLflowLogging(
+            run_name=run_name,
+            network_type=network_type,
+            loss_fn=loss_fn_str,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            epochs=epochs
+        )
+    ]
+    model.fit(
+        epoch=epochs,
+        train_dataset=train_ds,
+        valid_dataset=test_ds,
+        callbacks=callbacks,
+        dataset_sink_mode=False
+    )
 
     """
     Predict the next 20 tokens based on some predefined input
