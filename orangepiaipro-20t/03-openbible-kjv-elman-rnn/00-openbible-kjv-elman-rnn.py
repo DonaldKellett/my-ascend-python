@@ -241,7 +241,7 @@ def predict(network, prefix, num_preds, vocab):
 
     return ' '.join([vocab.idx_to_token[idx] for idx in outputs])
 
-def transform_ds(dataset, batch_size, num_steps, vocab_size):
+def transform_ds(dataset, batch_size):
     dataset = dataset.batch(batch_size=batch_size, drop_remainder=False)
     return dataset
 
@@ -340,8 +340,8 @@ def main():
     batch_size = 256
     train_ds = ds.NumpySlicesDataset(data=(X_train, y_train), column_names=['feature', 'label'], shuffle=True)
     test_ds = ds.NumpySlicesDataset(data=(X_test, y_test), column_names=['feature', 'label'], shuffle=True)
-    train_ds = transform_ds(train_ds, batch_size=batch_size, num_steps=num_steps, vocab_size=vocab_size)
-    test_ds = transform_ds(test_ds, batch_size=batch_size, num_steps=num_steps, vocab_size=vocab_size)
+    train_ds = transform_ds(train_ds, batch_size=batch_size)
+    test_ds = transform_ds(test_ds, batch_size=batch_size)
 
     """
     Define our neural network for training
@@ -354,9 +354,16 @@ def main():
     Note that cross-entropy is exactly log-perplexity
     The logarithm function is monotonic increasing so minimizing cross-entropy is equivalent to minimizing perplexity
     """
-    learning_rate = 1.0
+    learning_rate = 0.1
+    weight_decay = 1e-4
+    momentum = 0.9
     loss_fn = SequenceCrossEntropyLoss(reduction='mean')
-    optimizer = nn.SGD(params=net_amp.trainable_params(), learning_rate=learning_rate)
+    optimizer = nn.SGD(
+        params=net_amp.trainable_params(),
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        momentum=momentum
+    )
 
     """
     Define our WithLossCell to wrap our network and loss function
@@ -403,7 +410,9 @@ def main():
             loss_fn=loss_fn_str,
             learning_rate=learning_rate,
             batch_size=batch_size,
-            epochs=epochs
+            epochs=epochs,
+            weight_decay=weight_decay,
+            momentum=momentum
         ),
         EarlyStopping(
             patience=10,
