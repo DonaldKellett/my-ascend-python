@@ -321,14 +321,16 @@ def main():
 
     """
     Extract sequences of num_steps tokens for our features and labels
-    Take the first 80% (approx.) samples as our training set with the remainder as our validation set
-    This gives 634k training samples and approx. 158k validation samples
+    Shuffle sequences then take 80% (approx.) samples as our training set with the remainder as our validation set
+    This gives approx. 634k training samples and 158k validation samples
     """
     num_steps = 32
     array = mindspore.Tensor([corpus[i:i+num_steps+1] for i in range(len(corpus) - num_steps)])
     X, y = array[:, :-1], array[:, 1:]
     X, y = X[:max_samples], y[:max_samples]
     num_samples = X.shape[0]
+    shuffle_idx = np.random.permutation(num_samples)
+    X, y = X[shuffle_idx], y[shuffle_idx]
     train_samples = 4 * num_samples // 5
     X_train, y_train = X[:train_samples].asnumpy(), y[:train_samples].asnumpy()
     X_test, y_test = X[train_samples:].asnumpy(), y[train_samples:].asnumpy()
@@ -354,9 +356,9 @@ def main():
     Note that cross-entropy is exactly log-perplexity
     The logarithm function is monotonic increasing so minimizing cross-entropy is equivalent to minimizing perplexity
     """
-    learning_rate = 0.1
-    weight_decay = 1e-4
-    momentum = 0.9
+    learning_rate = 1.0
+    weight_decay = 0.0
+    momentum = 0.0
     loss_fn = SequenceCrossEntropyLoss(reduction='mean')
     optimizer = nn.SGD(
         params=net_amp.trainable_params(),
